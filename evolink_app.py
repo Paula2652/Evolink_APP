@@ -1,15 +1,15 @@
 """
-EvoLink - versão enxuta (CustomTkinter) com banco de dados SQLite e layout responsivo
+EvoLink - versão enxuta (CustomTkinter) com banco de dados MySQL e layout responsivo
 
-Arquivos (deixe na MESMA pasta):  evolink_app.py  +  banco.py
-Como executar:  pip install customtkinter   ->   python evolink_app.py
+Arquivos (deixe na MESMA pasta):  evolink_app.py  +  banco.py  +  painel.py
+Como executar:  pip install customtkinter mysql-connector-python matplotlib   ->   python evolink_app.py
+Antes: ligue o MySQL e coloque sua senha em CONFIG_MYSQL (arquivo banco.py).
 
 Layout automático:
   - janela larga (>= 760 px)   -> modo COMPUTADOR (menu lateral)
   - janela estreita (< 760 px) -> modo CELULAR (barra superior + menu embaixo)
 Também dá para forçar o modo em  Usuário > Visual do app.
 """
-import sqlite3
 from datetime import datetime
 from tkinter import font as tkfont
 from tkinter import messagebox
@@ -17,6 +17,17 @@ from tkinter import messagebox
 import customtkinter as ctk
 
 import banco
+
+# Gráficos: se algo falhar aqui, o app abre normal e a tela "Visão geral"
+# mostra o motivo exato do erro (guardado em ERRO_PAINEL).
+PAINEL_OK = False
+ERRO_PAINEL = ""
+try:
+    import painel
+    from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+    PAINEL_OK = True
+except Exception as erro:
+    ERRO_PAINEL = f"{type(erro).__name__}: {erro}"
 
 # ---------------------------------------------------------------- cores (iguais ao EvoLink web)
 NAVY950, NAVY900, NAVY800 = "#0a1428", "#0d1b35", "#122343"
@@ -46,6 +57,7 @@ COR_SITUACAO = {
     "Resolvido": ("#e6f6ee", "#1f8a55"),
     "Cancelado": ("#eef1f8", "#6b7593"),
 }
+ITEM_VISAO = ("visao", "📊", "Visão geral", "Visão")
 ITEM_TECNICO = ("tecnico", "🧰", "Painel do técnico", "Painel")
 SEM_CHAMADO = "Sem chamado (plano / mensalidade)"
 
@@ -91,7 +103,7 @@ def descricao_chamado(c):
 
 # ---------------------------------------------------------------- aplicativo
 class App(ctk.CTk):
-    def __init__(self, caminho_banco=None):
+    def __init__(self):
         super().__init__()
         ctk.set_appearance_mode("light")
         ctk.set_default_color_theme("blue")
@@ -105,7 +117,13 @@ class App(ctk.CTk):
         self.fam_titulo = "Space Grotesk" if "Space Grotesk" in fams else "Segoe UI"
         self.fam_corpo = "Inter" if "Inter" in fams else "Segoe UI"
 
-        self.db = banco.Banco(caminho_banco)
+        try:
+            self.db = banco.Banco()
+        except banco.ErroBanco as erro:
+            self.withdraw()
+            messagebox.showerror("EvoLink - banco de dados", str(erro))
+            self.destroy()
+            raise SystemExit(1)
         self.sintomas = {r["descricao_sintoma"]: r["id_sintoma"] for r in self.db.listar_sintomas()}
 
         self.usuario = None          # id_usuario do usuário logado
@@ -132,6 +150,7 @@ class App(ctk.CTk):
     def itens_menu(self):
         itens = list(ITENS_MENU)
         if self.tipo == "tecnico":
+            itens.append(ITEM_VISAO)
             itens.append(ITEM_TECNICO)
         return itens
 
@@ -453,6 +472,7 @@ class App(ctk.CTk):
             "defeitos": self.pagina_defeitos,
             "pagamentos": self.pagina_pagamentos,
             "tecnico": self.pagina_tecnico,
+            "visao": self.pagina_visao_geral,
         }[chave]()
 
     def sair(self):
@@ -857,7 +877,154 @@ class App(ctk.CTk):
                 side="left" if not self.pc else "top", anchor="w" if not self.pc else "e")
         if meus:
             ctk.CTkFrame(hist, height=10, fg_color="transparent").pack()
+        self._meu_resumo()
 
+    # ------------------------------------------------------------ 7) VISÃO GERAL (gráficos)
+    def pagina_visao_geral(self):
+        if self.tipo != "tecnico":
+            self.mostrar_pagina("usuario")
+            return
+        self.cabecalho("Visão geral", "Cadastros, chamados, problemas mais comuns e "
+                                      "financeiro de todos os clientes.")
+        st = self._carregar_painel(None)
+        if st is None:
+            return
+        self._cartoes_resumo(st)
+        self._grade_graficos(st, painel.ORDEM_TECNICO)
+
+        curtas = not self.pc
+        cab_sit = (["Problema", "Ab.", "And.", "Peça", "Res.", "Canc.", "Total"] if curtas else
+                   ["Problema", "Aberto", "Em andamento", "Aguardando peça", "Resolvido",
+                    "Cancelado", "Total"])
+        self._tabela("Problemas por situação",
+                     [(cab_sit[0], 3 if curtas else 4, "w")] + [(n, 1, "e") for n in cab_sit[1:]],
+                     st["problema_situacao"], "Nenhum chamado aberto ainda.")
+        self._tabela("Chamados sem pagamento",
+                     [("Chamado", 1, "w"), ("Cliente", 2, "w"), ("Problema", 3, "w"),
+                      ("Aberto em", 2, "w"), ("Dias", 1, "e")],
+                     [[f"#{x['id']}", x["cliente"], x["problema"], x["data"], x["dias"]]
+                      for x in st["sem_pagamento"][:15]],
+                     "Nenhum chamado pendente de pagamento.")
+        self._tabela("Últimos pagamentos",
+                     [("Cliente", 2, "w"), ("Valor", 2, "e"), ("Desconto", 2, "e"),
+                      ("Forma", 3, "w"), ("Data", 2, "w")],
+                     [[x["cliente"], brl(x["valor"]), brl(x["desconto"]), x["forma"], x["data"]]
+                      for x in st["ultimos_pagamentos"]],
+                     "Nenhum pagamento registrado ainda.")
+        self._tabela("Ranking de clientes",
+                     [("Cliente", 4, "w"), ("Chamados", 2, "e"), ("Total pago", 3, "e")],
+                     [[x["nome"], x["chamados"], brl(x["pago"])] for x in st["ranking"]],
+                     "Nenhum cliente com chamados ainda.")
+
+    def _meu_resumo(self):
+        """Gráficos só do cliente logado, no fim da tela Pagamentos."""
+        if not PAINEL_OK:
+            return
+        try:
+            st = painel.calcular(self.db.dados_painel(self.usuario))
+        except Exception:
+            return  # o resumo é um extra: se falhar, a tela de pagamentos continua normal
+        ctk.CTkLabel(self.conteudo, text="Meu resumo", anchor="w", text_color=NAVY950,
+                     font=self.ft(18)).pack(fill="x", padx=self.pad, pady=(6, 8))
+        self._grade_graficos(st, painel.ORDEM_CLIENTE, painel.TITULOS_CLIENTE)
+
+    def _carregar_painel(self, id_cliente):
+        if not PAINEL_OK:
+            ctk.CTkLabel(self.conteudo, anchor="w", justify="left", text_color=TEXTO2,
+                         font=self.fc(13), wraplength=self.larg_util(),
+                         text="Não consegui carregar os gráficos.\n\n"
+                              f"Motivo: {ERRO_PAINEL}\n\n"
+                              "Confira se o arquivo se chama painel.py e está na mesma pasta "
+                              "do evolink_app.py. Se faltar a biblioteca, instale no terminal:\n\n"
+                              "    pip install matplotlib\n\n"
+                              "Depois feche e abra o EvoLink de novo."
+                         ).pack(fill="x", padx=self.pad, pady=10)
+            return None
+        try:
+            return painel.calcular(self.db.dados_painel(id_cliente))
+        except Exception as erro:
+            messagebox.showerror("EvoLink - gráficos",
+                                 f"Não consegui carregar os dados do painel.\n\nDetalhe: {erro}")
+            return None
+
+    def _cartoes_resumo(self, st):
+        r = st["resumo"]
+        stats = [(str(r["chamados"]), "Chamados", NAVY950),
+                 (str(r["abertos"]), "Abertos agora", BLUE500),
+                 (str(r["clientes"]), "Clientes", NAVY950),
+                 (brl(r["faturamento_mes"]), "Faturamento do mês", "#1f8a55"),
+                 (brl(r["ticket_medio"]), "Ticket médio", "#1f8a55")]
+        colunas = 5 if self.pc else 2
+        resumo = ctk.CTkFrame(self.conteudo, fg_color="transparent")
+        resumo.pack(fill="x", padx=self.pad, pady=(0, 10))
+        for c in range(colunas):
+            resumo.grid_columnconfigure(c, weight=1, uniform="stat")
+        for i, (num, lab, cor) in enumerate(stats):
+            cartao = self.painel(resumo)
+            cartao.grid(row=i // colunas, column=i % colunas, sticky="nsew", padx=4, pady=4)
+            ctk.CTkLabel(cartao, text=num, text_color=cor, anchor="w",
+                         font=self.ft(20 if self.pc else 15)).pack(fill="x", padx=14, pady=(12, 0))
+            ctk.CTkLabel(cartao, text=lab, text_color=TEXTO2, anchor="w",
+                         font=self.fc(12 if self.pc else 10)).pack(fill="x", padx=14, pady=(0, 10))
+
+    def _grade_graficos(self, st, chaves, titulos=None):
+        """Cartões com um gráfico cada: 2 por linha no PC, 1 por linha no celular.
+        O matplotlib redimensiona sozinho quando a janela muda de tamanho."""
+        titulos = titulos or {}
+        colunas = 2 if self.pc else 1
+        grade = ctk.CTkFrame(self.conteudo, fg_color="transparent")
+        grade.pack(fill="x", padx=self.pad, pady=(0, 10))
+        for c in range(colunas):
+            grade.grid_columnconfigure(c, weight=1, uniform="graf")
+        quebra = max(200, (self.larg_util() - 14 * (colunas - 1)) // colunas - 36)
+        altura = 290 if self.pc else 260
+        for i, chave in enumerate(chaves):
+            titulo, pergunta, _ = painel.GRAFICOS[chave]
+            cartao = self.painel(grade)
+            cartao.grid(row=i // colunas, column=i % colunas, sticky="nsew", padx=4, pady=4)
+            ctk.CTkLabel(cartao, text=titulos.get(chave, titulo), anchor="w", justify="left",
+                         text_color=NAVY950, font=self.ft(15), wraplength=quebra
+                         ).pack(fill="x", padx=16, pady=(14, 0))
+            ctk.CTkLabel(cartao, text=pergunta, anchor="w", justify="left",
+                         text_color=TEXTO2, font=self.fc(11), wraplength=quebra
+                         ).pack(fill="x", padx=16, pady=(0, 6))
+            fig = painel.criar_figura(chave, st, quebra, altura)
+            canvas = FigureCanvasTkAgg(fig, master=cartao)
+            alvo = canvas.get_tk_widget()
+            alvo.configure(width=200, height=altura, bg="white", highlightthickness=0)
+            alvo.pack(fill="both", expand=True, padx=10, pady=(0, 12))
+            canvas.draw()
+
+    def _tabela(self, titulo, colunas, linhas, vazio="Nada por aqui ainda."):
+        """colunas = [(nome, peso da largura, alinhamento 'w' ou 'e')]; linhas = listas de valores."""
+        cx = self.painel(self.conteudo)
+        cx.pack(fill="x", padx=self.pad, pady=(0, 14))
+        ctk.CTkLabel(cx, text=titulo, anchor="w", text_color=NAVY950, font=self.ft(16)
+                     ).pack(fill="x", padx=18, pady=(16, 8))
+        if not linhas:
+            ctk.CTkLabel(cx, text=vazio, anchor="w", text_color=TEXTO2, font=self.fc(13)
+                         ).pack(fill="x", padx=18, pady=(0, 18))
+            return
+        tab = ctk.CTkFrame(cx, fg_color="transparent")
+        tab.pack(fill="x", padx=14, pady=(0, 14))
+        soma = sum(peso for _, peso, _ in colunas)
+        total = max(220, self.larg_util() - 60)
+        for j, (_, peso, _) in enumerate(colunas):
+            tab.grid_columnconfigure(j, weight=peso, uniform="col")
+        fonte = 12 if self.pc else 10
+        for j, (nome, peso, alinha) in enumerate(colunas):
+            ctk.CTkLabel(tab, text=nome, anchor=alinha, justify="left", text_color=TEXTO2,
+                         fg_color="#eef1f8", corner_radius=0, font=self.fc(fonte, True),
+                         padx=8, pady=6, wraplength=int(total * peso / soma) - 16
+                         ).grid(row=0, column=j, sticky="nsew")
+        for i, linha in enumerate(linhas, start=1):
+            fundo = CARD if i % 2 else PAPER
+            for j, (_, peso, alinha) in enumerate(colunas):
+                ctk.CTkLabel(tab, text=str(linha[j]), anchor=alinha, justify="left",
+                             text_color=TEXTO, fg_color=fundo, corner_radius=0,
+                             font=self.fc(fonte), padx=8, pady=6,
+                             wraplength=int(total * peso / soma) - 16
+                             ).grid(row=i, column=j, sticky="nsew")
 
     # ------------------------------------------------------------ 6) PAINEL DO TÉCNICO
     def pagina_tecnico(self):
