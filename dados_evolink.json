@@ -1,0 +1,27 @@
+{
+  "usuarios": {
+    "ana paula": {
+      "salt": "85f5c4d43cdefd0b",
+      "hash": "980b3c087feeea9abd65c5122bafdc4141622812d6ab4ba854b5c1d44e0fb011",
+      "perfil": {
+        "nome": "ana paula",
+        "telefone": "(90)12345678",
+        "endereco": "rua mundurucus",
+        "email": "adsafghdjuty2@gmail.com"
+      }
+    }
+  },
+  "chamados": [
+    {
+      "id": 1,
+      "usuario": "ana paula",
+      "problema": "Erro ao abrir programas",
+      "categoria": "Erro ao abrir programas",
+      "informacoes": "",
+      "data": "21/10/2026 20:05",
+      "valor": 200.0,
+      "pago": true,
+      "forma": "Cartão de débito"
+    }
+  ]
+}
